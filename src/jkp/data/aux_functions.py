@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime
 import functools
 import operator
 import os
@@ -21,7 +20,7 @@ import polars_ols  # noqa: F401 - required for least_squares method on polars ex
 from ibis import _
 from polars import col
 
-from .config import MAIN_FILTERS
+from .config import END_DATE, MAIN_FILTERS
 
 
 def fl_none():
@@ -2307,7 +2306,7 @@ def comp_hgics(lib):
 
     Steps:
         1) Load raw file (national/global); replace null gics with -999 sentinel.
-        2) Compute row counts and terminal rows; set open-ended indthru to (max(indfrom), or today).
+        2) Compute row counts and terminal rows; set open-ended indthru to (max(indfrom) or END_DATE).
         3) Create date ranges [indfrom, indthru]; explode; unique per (gvkey,date).
         4) Write to na_hgics.parquet or g_hgics.parquet.
 
@@ -2329,8 +2328,8 @@ def comp_hgics(lib):
     )
     indthru_date = (
         pl.lit(data[["indfrom"]].max()[0, 0])
-        if data[["indfrom"]].max()[0, 0] > date.today()
-        else pl.lit(date.today())
+        if data[["indfrom"]].max()[0, 0] > END_DATE
+        else pl.lit(END_DATE)
     )
     c1 = col("n") == col("n_aux")
     c2 = col("indthru").is_null()
@@ -7974,7 +7973,7 @@ def merge_roll_apply_daily_results():
     Output:
         'roll_apply_daily.parquet' with merged roll regression results.
     """
-    date_idx = datetime.datetime.today().month + datetime.datetime.today().year * 12
+    date_idx = END_DATE.month + END_DATE.year * 12
     df_dates = pl.DataFrame(
         {
             "aux_date": [i + 1 for i in range(23112, date_idx + 1)],
@@ -8381,7 +8380,7 @@ def gen_aux_maps(sfx):
         List of {'group_map','date_map'} mappings.
     """
     parameter_mapping = {"_21d": 1, "_126d": 6, "_252d": 12, "_1260d": 60}
-    date_aux = datetime.datetime.today().month + datetime.datetime.today().year * 12
+    date_aux = END_DATE.month + END_DATE.year * 12
     if sfx in parameter_mapping:
         date_idx = list(range(23113 - parameter_mapping[sfx], date_aux + 1))
         aux_maps = group_mapping_dfs(date_idx, parameter_mapping[sfx])
