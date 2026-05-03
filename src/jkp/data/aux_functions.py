@@ -7963,7 +7963,7 @@ def merge_roll_apply_daily_results():
         Merge rolling regression daily results into one dataset.
 
     Steps:
-        1) Build date index from earliest to current month.
+        1) Build date index from earliest to END_DATE month.
         2) Load id_int mapping and all '__roll*' parquet files (sorted for
            deterministic join order).
         3) Outer join them on (id_int, aux_date).
@@ -8373,7 +8373,7 @@ def gen_aux_maps(sfx):
 
     Steps:
         1) Map suffix to k: {'_21d':1,'_126d':6,'_252d':12,'_1260d':60} or int(sfx).
-        2) Build aux_date range from start index to current month index.
+        2) Build aux_date range from start index to END_DATE month index.
         3) Create grouped mappings via group_mapping_dfs(date_idx, k).
 
     Output:
