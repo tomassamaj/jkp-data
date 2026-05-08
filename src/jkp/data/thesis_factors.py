@@ -13,10 +13,10 @@ Factors and their construction:
     MOM  ret_12_2 monthly      long=Winner(H), short=Loser(L)
       ret_12_2 = (1+ret_12_1)/(1+ret_exc_lag1) - 1  (skip-month correction)
 
-  Group C — from FF 2×3 HML sort + value-weighted all stocks:
-    HML  be_me  annual June  ½(S/H + B/H) - ½(S/L + B/L)
-    SMB  be_me  annual June  ⅓(S/H+S/M+S/L) - ⅓(B/H+B/M+B/L)
-    MktRF        value-weighted all stocks, w = me_i / Σme
+  Group C — FF sorts + value-weighted all stocks:
+    HML   be_me  annual June  ½(S/H + B/H) - ½(S/L + B/L)
+    SMB   FF5: average of SMBs from be_me, ope_be, at_gr1 sorts (Fama-French 2015)
+    MktRF value-weighted all stocks, w = me_i / Σme
 
 Output: processed/thesis_factor_weights.parquet
   Columns: eom, id, w_MktRF, w_SMB, w_HML, w_MOM, w_RMW, w_CMA, w_ROE, w_IA, w_BAB
@@ -129,6 +129,31 @@ def _assign_portfolios(
     )
 
 
+def _smb_from_sort(df: pl.DataFrame, char_col: str, *, positive_char: bool = False) -> pl.DataFrame:
+    """
+    Per-stock SMB weight contribution from one annual 2×3 sort.
+    Returns (eom, id, w_smb) where w_smb = +(1/3)×vw for small, −(1/3)×vw for big.
+    """
+    df_sort = df.filter(pl.col(char_col).is_not_null())
+    if positive_char:
+        df_sort = df_sort.filter(pl.col(char_col) > 0)
+    bps = _june_breakpoints(df_sort, char_col, positive_char=positive_char)
+    return (
+        df_sort.with_columns(_reb_year().alias("reb_yr"))
+        .pipe(_assign_portfolios, bps, char_col, "reb_yr")
+        .filter(pl.col("sz_pf").is_not_null() & pl.col("char_pf").is_not_null())
+        .drop("reb_yr")
+        .pipe(_value_weight, ["eom", "sz_pf", "char_pf"])
+        .with_columns(
+            pl.when(pl.col("sz_pf") == "S")
+            .then((1 / 3) * pl.col("vw"))
+            .otherwise(-(1 / 3) * pl.col("vw"))
+            .alias("w_smb")
+        )
+        .select(["eom", "id", "w_smb"])
+    )
+
+
 def _value_weight(df: pl.DataFrame, group_cols: list[str]) -> pl.DataFrame:
     """Add 'vw' = me_i / Σme within group. Group must have me > 0."""
     return df.with_columns(
@@ -152,25 +177,24 @@ def compute_mktrf(df: pl.DataFrame) -> pl.DataFrame:
 
 def compute_hml_smb(df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
     """
-    FF 2×3 sort on be_me with annual June rebalancing.
-    Requires positive be_me (positive book equity).
-    HML = ½(S/H + B/H) − ½(S/L + B/L)
-    SMB = ⅓(S/H + S/M + S/L) − ⅓(B/H + B/M + B/L)
+    HML: FF 2×3 sort on be_me (positive only), annual June rebalancing.
+      HML = ½(S/H + B/H) − ½(S/L + B/L)
+    SMB: FF5 construction (Fama-French 2015) — average of SMBs from three independent
+      2×3 annual sorts on be_me, ope_be, and at_gr1.
     Returns (hml_weights, smb_weights) each with columns [eom, id, w_*].
     """
-    df_sort = df.filter(pl.col("be_me").is_not_null() & (pl.col("be_me") > 0))
-    bps = _june_breakpoints(df_sort, "be_me", positive_char=True)
-
-    assigned = (
-        df_sort.with_columns(_reb_year().alias("reb_yr"))
-        .pipe(_assign_portfolios, bps, "be_me", "reb_yr")
+    df_bm = df.filter(pl.col("be_me").is_not_null() & (pl.col("be_me") > 0))
+    bps_bm = _june_breakpoints(df_bm, "be_me", positive_char=True)
+    assigned_bm = (
+        df_bm.with_columns(_reb_year().alias("reb_yr"))
+        .pipe(_assign_portfolios, bps_bm, "be_me", "reb_yr")
         .filter(pl.col("sz_pf").is_not_null() & pl.col("char_pf").is_not_null())
         .drop("reb_yr")
         .pipe(_value_weight, ["eom", "sz_pf", "char_pf"])
     )
 
     hml = (
-        assigned.with_columns(
+        assigned_bm.with_columns(
             pl.when(pl.col("char_pf") == "H").then(0.5 * pl.col("vw"))
             .when(pl.col("char_pf") == "L").then(-0.5 * pl.col("vw"))
             .otherwise(0.0)
@@ -180,13 +204,19 @@ def compute_hml_smb(df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
         .select(["eom", "id", "w_HML"])
     )
 
+    # FF5 SMB: average the per-stock contributions from all three sorts
+    smb_bm = _smb_from_sort(df, "be_me", positive_char=True).rename({"w_smb": "w_bm"})
+    smb_op = _smb_from_sort(df, "ope_be").rename({"w_smb": "w_op"})
+    smb_inv = _smb_from_sort(df, "at_gr1").rename({"w_smb": "w_inv"})
     smb = (
-        assigned.with_columns(
-            pl.when(pl.col("sz_pf") == "S")
-            .then((1 / 3) * pl.col("vw"))
-            .otherwise(-(1 / 3) * pl.col("vw"))
-            .alias("w_SMB")
+        smb_bm
+        .join(smb_op, on=["eom", "id"], how="full", coalesce=True)
+        .join(smb_inv, on=["eom", "id"], how="full", coalesce=True)
+        .fill_null(0.0)
+        .with_columns(
+            ((pl.col("w_bm") + pl.col("w_op") + pl.col("w_inv")) / 3).alias("w_SMB")
         )
+        .filter(pl.col("w_SMB") != 0.0)
         .select(["eom", "id", "w_SMB"])
     )
 
