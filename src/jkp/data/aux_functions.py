@@ -7535,23 +7535,21 @@ def acc_chars_list():
 def finish_daily_chars(output_path):
     """
     Description:
-        Combine bid-ask spread and roll-based daily metrics into a final daily chars file.
+        Compute final daily characteristics from roll-based metrics.
 
     Steps:
-        1) Load Corwin-Schultz and roll_apply_daily parquet files.
-        2) Outer join on (id, eom).
-        3) Add betabab (beta * rvol / mktvol) and rmax5_rvol ratio.
-        4) Drop helper columns.
+        1) Load roll_apply_daily parquet (rvol_252d, mktvol_252d, mktcorr_1260d).
+        2) Compute betabab_1260d = corr_1260d × rvol_252d / __mktvol_252d.
+        3) Drop helper column __mktvol_252d.
 
     Output:
-        '{output_path}' parquet with final daily characteristics.
+        '{output_path}' parquet with betabab_1260d and supporting metrics.
     """
-    bidask = pl.scan_parquet("corwin_schultz.parquet")
-    r1 = pl.scan_parquet("roll_apply_daily.parquet").with_columns(col("id").cast(pl.Int64))
-    daily_chars = bidask.join(r1, how="outer_coalesce", on=["id", "eom"])
+    daily_chars = pl.scan_parquet("roll_apply_daily.parquet").with_columns(
+        col("id").cast(pl.Int64)
+    )
     daily_chars = daily_chars.with_columns(
         betabab_1260d=col("corr_1260d") * col("rvol_252d") / col("__mktvol_252d"),
-        rmax5_rvol_21d=col("rmax5_21d") / col("rvol_252d"),
     ).drop("__mktvol_252d")
     daily_chars.collect().write_parquet(output_path)
 
@@ -8009,32 +8007,19 @@ def merge_roll_apply_daily_results():
 def merge_world_data_prelim():
     """
     Description:
-        Combine preliminary world data with factor/regression outputs.
+        Combine preliminary world data with daily characteristics.
 
     Steps:
-        1) Load world_data_prelim and factor files (beta, resmom, mispricing, etc.).
-        2) Join all on (id, eom).
-        3) Include firm age variable.
+        1) Load world_data_prelim and market_chars_d (contains betabab_1260d).
+        2) Left join on (id, eom).
 
     Output:
-        'world_data_-1.parquet' with enriched world dataset.
+        'world_data.parquet' with daily chars (betabab_1260d) merged in.
     """
     a = pl.scan_parquet("world_data_prelim.parquet")
-    b = pl.scan_parquet("beta_60m.parquet")
-    c = pl.scan_parquet("resmom_ff3_12_1.parquet")
-    d = pl.scan_parquet("resmom_ff3_6_1.parquet")
-    e = pl.scan_parquet("mp_factors.parquet")
     f = pl.scan_parquet("market_chars_d.parquet")
-    g = pl.scan_parquet("firm_age.parquet").select(["id", "eom", "age"])
-    world_data = (
-        a.join(b, how="left", on=["id", "eom"])
-        .join(c, how="left", on=["id", "eom"])
-        .join(d, how="left", on=["id", "eom"])
-        .join(e, how="left", on=["id", "eom"])
-        .join(f, how="left", on=["id", "eom"])
-        .join(g, how="left", on=["id", "eom"])
-    )
-    world_data.collect().write_parquet("world_data_-1.parquet")
+    world_data = a.join(f, how="left", on=["id", "eom"])
+    world_data.collect().write_parquet("world_data.parquet")
 
 
 @measure_time

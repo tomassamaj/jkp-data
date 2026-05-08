@@ -68,6 +68,18 @@ def portfolio(
 
 
 @app.command()
+def thesis(
+    output_dir: Path = typer.Argument(
+        help="Directory containing pipeline output (must match output_dir from build).",
+    ),
+) -> None:
+    """Compute stock-level factor weights for all 9 thesis factors."""
+    from .thesis_factors import run_thesis_factors
+
+    run_thesis_factors(output_dir=output_dir)
+
+
+@app.command()
 def connect(
     reset: bool = typer.Option(
         False,

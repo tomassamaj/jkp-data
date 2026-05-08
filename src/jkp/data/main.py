@@ -4,7 +4,6 @@ from .aux_functions import (
     acc_chars_list,
     add_ret_exc_wins,
     ap_factors,
-    bidask_hl,
     classify_stocks_size_groups,
     combine_ann_qtr_chars,
     combine_crsp_comp_sf,
@@ -14,30 +13,21 @@ from .aux_functions import (
     crsp_industry,
     download_raw_data_tables,
     ff_ind_class,
-    filter_dsf,
     filter_msf,
     filter_world,
     finish_daily_chars,
-    firm_age,
     gen_raw_data_dfs,
-    market_beta,
     market_chars_monthly,
     market_returns,
     merge_industry_to_world_msf,
-    merge_qmj_to_world_data,
     merge_roll_apply_daily_results,
     merge_world_data_prelim,
-    mispricing_factors,
     nyse_size_cutoffs,
     prepare_comp_sf,
     prepare_crsp_sf,
     prepare_daily,
-    quality_minus_junk,
-    residual_momentum,
     return_cutoffs,
     roll_apply_daily,
-    save_accounting_data,
-    save_daily_ret,
     save_full_files_and_cleanup,
     save_main_data,
     save_monthly_ret,
@@ -109,6 +99,7 @@ def run_pipeline(*, persistent_connection: bool = False, output_dir: Path) -> No
         "acc_chars_world.parquet",
         "world_data_prelim.parquet",
     )
+    # Keep ap_factors (daily) because prepare_daily() requires ap_factors_daily.parquet
     ap_factors(
         "ap_factors_daily.parquet",
         "d",
@@ -127,34 +118,17 @@ def run_pipeline(*, persistent_connection: bool = False, output_dir: Path) -> No
         10,
         3,
     )
-    firm_age("world_msf.parquet")
-    mispricing_factors("world_data_prelim.parquet", 10, min_fcts=3)
-    market_beta("beta_60m.parquet", "world_msf.parquet", "ap_factors_monthly.parquet", 60, 36)
-    residual_momentum(
-        "resmom_ff3", "world_msf.parquet", "ap_factors_monthly.parquet", 36, 24, 12, 1
-    )
-    residual_momentum("resmom_ff3", "world_msf.parquet", "ap_factors_monthly.parquet", 36, 24, 6, 1)
-    bidask_hl("corwin_schultz.parquet", "world_dsf.parquet", "market_returns_daily.parquet", 10)
     prepare_daily("world_dsf.parquet", "ap_factors_daily.parquet")
-    for var in ["rvol", "rmax", "skew", "capm_ext", "ff3", "hxz4", "dimsonbeta", "zero_trades"]:
-        roll_apply_daily(var, "_21d", 15)
-    for var in ["zero_trades", "turnover", "dolvol", "ami"]:
-        roll_apply_daily(var, "_126d", 60)
-    for var in ["rvol", "capm", "downbeta", "zero_trades", "prc_to_high", "mktvol"]:
-        roll_apply_daily(var, "_252d", 120)
-    for var in ["mktcorr"]:
-        roll_apply_daily(var, "_1260d", 750)
+    # Only the 3 rolling metrics needed for betabab_1260d = corr_1260d × rvol_252d / mktvol_252d
+    roll_apply_daily("rvol", "_252d", 120)
+    roll_apply_daily("mktvol", "_252d", 120)
+    roll_apply_daily("mktcorr", "_1260d", 750)
     merge_roll_apply_daily_results()
     finish_daily_chars("market_chars_d.parquet")
     merge_world_data_prelim()
-    quality_minus_junk("world_data_-1.parquet", 10)
-    merge_qmj_to_world_data()
-    filter_dsf()
     filter_msf()
     filter_world()
     save_main_data(paths)
-    save_daily_ret()
     save_monthly_ret()
-    save_accounting_data()
     save_output_files()
     save_full_files_and_cleanup(clear_interim=True)
