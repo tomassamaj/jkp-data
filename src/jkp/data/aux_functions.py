@@ -7916,9 +7916,6 @@ def save_full_files_and_cleanup(clear_interim=True):
     Output:
         Compressed parquet files in return_data/ and characteristics/, cleanup of temp files.
     """
-    pl.scan_parquet("../interim/world_dsf_output.parquet").select(
-        pl.all().shrink_dtype()
-    ).sink_parquet("return_data/world_dsf.parquet")
     pl.scan_parquet("../interim/world_data_output.parquet").select(
         pl.all().shrink_dtype()
     ).sink_parquet("characteristics/world_data.parquet")

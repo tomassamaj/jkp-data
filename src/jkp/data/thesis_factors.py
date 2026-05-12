@@ -213,6 +213,7 @@ def compute_hml_smb(df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
         .join(smb_op, on=["eom", "id"], how="full", coalesce=True)
         .join(smb_inv, on=["eom", "id"], how="full", coalesce=True)
         .fill_null(0.0)
+        .with_columns(pl.col("id").cast(pl.Int64))
         .with_columns(
             ((pl.col("w_bm") + pl.col("w_op") + pl.col("w_inv")) / 3).alias("w_SMB")
         )
