@@ -794,8 +794,9 @@ def download_raw_data_tables(
         "comp.fundq",
         "crsp.stkdelists",
         "comp.secm",
-        "crsp.indmthseriesdata_ind",
-        "crsp.indseriesinfohdr_ind",
+        # crsp.indmthseriesdata_ind — requires crsp_a_indexes subscription (not available)
+        # crsp.indseriesinfohdr_ind — requires crsp_a_indexes subscription (not available)
+        # Downstream coalesce(t30ret, rf) falls back to ff.factors_monthly rf instead.
         "crsp.msf_v2",
         "comp.g_co_hgic",
         "crsp.dsf_v2",
@@ -943,19 +944,12 @@ def build_mcti():
         Writes raw_data_dfs/crsp_mcti.parquet (no return value).
     """
 
-    a = pl.read_parquet("../raw/raw_tables/crsp_indmthseriesdata_ind.parquet")
-    b = pl.read_parquet("../raw/raw_tables/crsp_indseriesinfohdr_ind.parquet")
-
-    ab = a.join(b, on="indno", how="inner")
-
-    out = (
-        ab.filter(pl.col("indno") == 1000708)
-        .select(["indno", "indnm", "mthcaldt", "mthtotret", "mthtotind"])
-        .rename({"mthcaldt": "caldt", "mthtotret": "t30ret"})
-    )
-
+    # crsp_a_indexes subscription not available; write empty stub so that
+    # downstream coalesce(t30ret, rf) falls back to ff.factors_monthly rf.
     os.makedirs("raw_data_dfs", exist_ok=True)
-    out.write_parquet("raw_data_dfs/crsp_mcti.parquet")
+    pl.DataFrame({"caldt": pl.Series([], dtype=pl.Date), "t30ret": pl.Series([], dtype=pl.Float64)}).write_parquet(
+        "raw_data_dfs/crsp_mcti.parquet"
+    )
 
 
 @measure_time
