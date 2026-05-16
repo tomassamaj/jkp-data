@@ -71,6 +71,9 @@ desktop.ini
 
 # Local reference docs (not for the repo)
 CLUSTER_RUN.md
+THESIS_NEXT_STEPS.md
+factor_replication_comparison.png
+nber_data_raw.RData
 
 # Keyring files (plaintext/alt backends)
 .local/
