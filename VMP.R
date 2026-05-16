@@ -1377,3 +1377,127 @@ cumulative_plot <- ggplot(plot_data_cumulative,
   theme(legend.position = "bottom")
 print(cumulative_plot)
 
+
+############################ PART 3: JKP Replication Quality Check ##########################################
+
+# Install arrow if needed (required for reading parquet files)
+if (!"arrow" %in% rownames(installed.packages())) install.packages("arrow")
+library(arrow)
+
+# --- Load JKP parquet files ---
+thesis_weights <- read_parquet("data/processed/thesis_factor_weights.parquet") |>
+  mutate(
+    id  = as.numeric(id),   # arrow reads Int64 as bit64; cast to numeric for dplyr joins
+    eom = as.Date(eom)
+  )
+
+monthly_ret <- read_parquet("data/processed/return_data/return_data/world_ret_monthly.parquet") |>
+  filter(excntry == "USA") |>
+  mutate(
+    id  = as.numeric(id),
+    eom = as.Date(eom)
+  ) |>
+  select(eom, id, ret_exc)
+
+# --- Compute JKP factor returns: sum(weight_i * ret_exc_i) per month ---
+# Weights at eom=t are formed using end-of-t characteristics and earn returns in t+1.
+# Shift eom forward one month so the join matches weights(t) to ret_exc(t+1).
+jkp_factors <- thesis_weights |>
+  mutate(eom = eom %m+% months(1)) |>
+  inner_join(monthly_ret, by = c("eom", "id")) |>
+  group_by(eom) |>
+  summarize(
+    jkp_mktrf = sum(w_MktRF * ret_exc, na.rm = TRUE),
+    jkp_smb   = sum(w_SMB   * ret_exc, na.rm = TRUE),
+    jkp_hml   = sum(w_HML   * ret_exc, na.rm = TRUE),
+    jkp_mom   = sum(w_MOM   * ret_exc, na.rm = TRUE),
+    jkp_rmw   = sum(w_RMW   * ret_exc, na.rm = TRUE),
+    jkp_cma   = sum(w_CMA   * ret_exc, na.rm = TRUE),
+    jkp_roe   = sum(w_ROE   * ret_exc, na.rm = TRUE),
+    jkp_ia    = sum(w_IA    * ret_exc, na.rm = TRUE),
+    jkp_bab   = sum(w_BAB   * ret_exc, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  rename(date = eom)
+
+# --- Get original monthly factor returns from Part 1 ---
+original_factors <- factors_vol_managed |>
+  select(
+    date,
+    orig_mktrf = mkt_return_comp,
+    orig_smb   = smb_return_comp,
+    orig_hml   = hml_return_comp,
+    orig_mom   = mom_return_comp,
+    orig_rmw   = rmw_return_comp,
+    orig_cma   = cma_return_comp,
+    orig_roe   = roe_return_comp,
+    orig_ia    = ia_return_comp,
+    orig_bab   = bab_return_comp
+  )
+
+# --- Merge on common sample, starting 1964 ---
+comparison <- original_factors |>
+  inner_join(jkp_factors, by = "date") |>
+  filter(date >= ymd("1964-01-01"))
+
+# --- Build one plot per factor ---
+factor_specs <- list(
+  list(label = "MktRF", orig = "orig_mktrf", jkp = "jkp_mktrf"),
+  list(label = "SMB",   orig = "orig_smb",   jkp = "jkp_smb"),
+  list(label = "HML",   orig = "orig_hml",   jkp = "jkp_hml"),
+  list(label = "Mom",   orig = "orig_mom",   jkp = "jkp_mom"),
+  list(label = "RMW",   orig = "orig_rmw",   jkp = "jkp_rmw"),
+  list(label = "CMA",   orig = "orig_cma",   jkp = "jkp_cma"),
+  list(label = "ROE",   orig = "orig_roe",   jkp = "jkp_roe"),
+  list(label = "IA",    orig = "orig_ia",    jkp = "jkp_ia"),
+  list(label = "BAB",   orig = "orig_bab",   jkp = "jkp_bab")
+)
+
+replication_plots <- lapply(factor_specs, function(fs) {
+  corr <- cor(comparison[[fs$orig]], comparison[[fs$jkp]], use = "complete.obs")
+
+  comparison |>
+    select(date, Original = !!fs$orig, `JKP Replicated` = !!fs$jkp) |>
+    filter(!is.na(Original) & !is.na(`JKP Replicated`)) |>
+    arrange(date) |>
+    mutate(
+      Original        = cumprod(1 + Original),
+      `JKP Replicated` = cumprod(1 + `JKP Replicated`)
+    ) |>
+    pivot_longer(cols = -date, names_to = "source", values_to = "cumret") |>
+    ggplot(aes(x = date, y = cumret, color = source)) +
+    geom_line(alpha = 0.75, linewidth = 0.4) +
+    scale_color_manual(values = c("Original" = "darkblue", "JKP Replicated" = "#e05c2a")) +
+    scale_y_log10(labels = scales::number_format(accuracy = 0.1, suffix = "x")) +
+    labs(
+      title    = fs$label,
+      subtitle = sprintf("Correlation: %.3f", corr),
+      x = NULL, y = "Cumulative Return (log scale)", color = NULL
+    ) +
+    theme_minimal(base_size = 9) +
+    theme(legend.position = "bottom", panel.grid.minor = element_blank())
+})
+
+# --- Combine into 3x3 grid ---
+replication_grid <- wrap_plots(replication_plots, ncol = 3) +
+  plot_annotation(
+    title    = "JKP Replicated vs. Original Factor Returns",
+    subtitle = "Monthly returns over common sample | Orange = JKP, Blue = Original",
+    theme = theme(
+      plot.title    = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(size = 11)
+    )
+  ) +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+print(replication_grid)
+
+ggsave(
+   filename = "factor_replication_comparison.png",
+   plot     = replication_grid,                          
+   width    = 16,
+   height   = 14,
+   dpi      = 150
+ )
+

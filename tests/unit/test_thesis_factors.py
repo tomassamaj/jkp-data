@@ -25,11 +25,14 @@ import pytest
 
 from jkp.data.thesis_factors import (
     _univariate_tercile,
+    compute_bab,
     compute_cma,
     compute_hml_smb,
+    compute_ia,
     compute_mom,
     compute_mktrf,
     compute_rmw,
+    compute_roe,
 )
 
 
@@ -67,6 +70,8 @@ def _make_ff_panel(months: list[date], n_per_size: int = 30) -> pl.DataFrame:
                 "be_me": 0.1 + frac * 2.0,         # 0.1 – 2.1, same spread in S and B
                 "ope_be": -0.2 + frac * 0.6,        # −0.2 – 0.4
                 "at_gr1": -0.3 + frac * 0.8,        # −0.3 – 0.5
+                "niq_be": -0.1 + frac * 0.3,        # −0.1 – 0.2
+                "betabab_1260d": 0.5 + frac * 1.5,  # 0.5 – 2.0
                 "ret_12_1": -0.4 + frac * 1.2,      # −0.4 – 0.8
                 "ret_exc": -0.05 + frac * 0.15,     # monthly return for shift(1) in MOM
                 "crsp_exchcd": 1,  # all NYSE
@@ -446,3 +451,109 @@ class TestUnivariateTercile:
     def test_output_columns(self):
         bab = _univariate_tercile(self.df, "betabab_1260d", direction=-1, weight_name="w_BAB")
         assert set(bab.columns) == {"eom", "id", "w_BAB"}
+
+
+# =============================================================================
+# compute_roe — q-factor 2×3 annual sort on niq_be
+# =============================================================================
+
+class TestComputeRoe:
+    """Annual June rebalancing: June 2019 NYSE data sets breakpoints for July 2019+."""
+
+    def setup_method(self):
+        self.df = _make_ff_panel([JUNE_2019, JULY_2019])
+        self.roe = compute_roe(self.df)
+
+    def _july(self):
+        return self.roe.filter(pl.col("eom") == JULY_2019)
+
+    def test_long_sum_one(self):
+        jul = self._july()
+        assert jul.height > 0
+        assert abs(jul.filter(pl.col("w_ROE") > 0)["w_ROE"].sum() - 1.0) < 1e-10
+
+    def test_short_sum_minus_one(self):
+        jul = self._july()
+        assert abs(jul.filter(pl.col("w_ROE") < 0)["w_ROE"].sum() + 1.0) < 1e-10
+
+    def test_high_niqbe_gets_positive_weight(self):
+        """High niq_be stocks (top 30%) are long — they have high id % n_per_size."""
+        jul = self._july()
+        long_ids = jul.filter(pl.col("w_ROE") > 0)["id"].to_list()
+        assert max(long_ids) >= 27
+
+    def test_low_niqbe_gets_negative_weight(self):
+        jul = self._july()
+        short_ids = jul.filter(pl.col("w_ROE") < 0)["id"].to_list()
+        assert min(short_ids) <= 4
+
+    def test_output_columns(self):
+        assert set(self.roe.columns) == {"eom", "id", "w_ROE"}
+
+
+# =============================================================================
+# compute_ia — q-factor 2×3 monthly sort on at_gr1
+# =============================================================================
+
+class TestComputeIa:
+    """Monthly rebalancing: a single month is sufficient."""
+
+    def setup_method(self):
+        self.df = _make_ff_panel([JULY_2019])
+        self.ia = compute_ia(self.df)
+
+    def test_long_sum_one(self):
+        assert self.ia.height > 0
+        assert abs(self.ia.filter(pl.col("w_IA") > 0)["w_IA"].sum() - 1.0) < 1e-10
+
+    def test_short_sum_minus_one(self):
+        assert abs(self.ia.filter(pl.col("w_IA") < 0)["w_IA"].sum() + 1.0) < 1e-10
+
+    def test_low_investment_gets_positive_weight(self):
+        """Conservative = low at_gr1 → long; low at_gr1 stocks have low id % 30."""
+        long_ids = self.ia.filter(pl.col("w_IA") > 0)["id"].to_list()
+        assert min(long_ids) <= 4
+
+    def test_high_investment_gets_negative_weight(self):
+        short_ids = self.ia.filter(pl.col("w_IA") < 0)["id"].to_list()
+        assert max(short_ids) >= 27
+
+    def test_output_columns(self):
+        assert set(self.ia.columns) == {"eom", "id", "w_IA"}
+
+
+# =============================================================================
+# compute_bab — Frazzini-Pedersen rank-weighted, beta-scaled
+# =============================================================================
+
+class TestComputeBab:
+    def setup_method(self):
+        self.df = _make_univariate_panel([JULY_2019])
+        self.bab = compute_bab(self.df)
+
+    def test_low_beta_gets_positive_weight(self):
+        """Low-id stocks have low beta → should be long."""
+        long_ids = self.bab.filter(pl.col("w_BAB") > 0)["id"].to_list()
+        assert min(long_ids) <= 4
+
+    def test_high_beta_gets_negative_weight(self):
+        short_ids = self.bab.filter(pl.col("w_BAB") < 0)["id"].to_list()
+        assert max(short_ids) >= 26
+
+    def test_net_beta_zero(self):
+        """FP property: long leg and short leg each have unit beta → net beta = 0."""
+        bab_with_beta = self.bab.join(
+            self.df.select(["id", "eom", "betabab_1260d"]), on=["id", "eom"], how="left"
+        )
+        net_beta = (bab_with_beta["w_BAB"] * bab_with_beta["betabab_1260d"]).sum()
+        assert abs(net_beta) < 1e-10, f"Net beta = {net_beta}, expected 0"
+
+    def test_null_char_excluded(self):
+        df_null = self.df.with_columns(
+            pl.when(pl.col("id") == 1).then(None).otherwise(pl.col("betabab_1260d")).alias("betabab_1260d")
+        )
+        bab = compute_bab(df_null)
+        assert 1 not in bab["id"].to_list()
+
+    def test_output_columns(self):
+        assert set(self.bab.columns) == {"eom", "id", "w_BAB"}

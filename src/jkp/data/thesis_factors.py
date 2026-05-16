@@ -313,8 +313,96 @@ def compute_mom(df: pl.DataFrame) -> pl.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Group A: BAB, ROE, IA (univariate tercile, non-MC breakpoints)
+# Group A: BAB (Frazzini-Pedersen), ROE (q-factor 2×3), IA (q-factor 2×3 monthly)
 # ---------------------------------------------------------------------------
+
+def compute_roe(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Q-factor ROE: FF 2×3 sort on niq_be. Annual June rebalancing.
+    Long = high ROE (char_pf=H), Short = low ROE (char_pf=L).
+    Matches Hou-Xue-Zhang q5 r_roe construction.
+    """
+    df_sort = df.filter(pl.col("niq_be").is_not_null())
+    bps = _june_breakpoints(df_sort, "niq_be")
+
+    return (
+        df_sort.with_columns(_reb_year().alias("reb_yr"))
+        .pipe(_assign_portfolios, bps, "niq_be", "reb_yr")
+        .filter(pl.col("sz_pf").is_not_null() & pl.col("char_pf").is_not_null())
+        .drop("reb_yr")
+        .pipe(_value_weight, ["eom", "sz_pf", "char_pf"])
+        .with_columns(
+            pl.when(pl.col("char_pf") == "H").then(0.5 * pl.col("vw"))
+            .when(pl.col("char_pf") == "L").then(-0.5 * pl.col("vw"))
+            .otherwise(0.0)
+            .alias("w_ROE")
+        )
+        .filter(pl.col("w_ROE") != 0.0)
+        .select(["eom", "id", "w_ROE"])
+    )
+
+
+def compute_ia(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Q-factor IA: FF 2×3 sort on at_gr1. Monthly rebalancing (distinct from CMA's June-only).
+    Long = low investment (char_pf=L), Short = high investment (char_pf=H).
+    Matches Hou-Xue-Zhang q5 r_ia construction.
+    """
+    df_sort = df.filter(pl.col("at_gr1").is_not_null())
+    bps = _monthly_breakpoints(df_sort, "at_gr1")
+
+    return (
+        df_sort.pipe(_assign_portfolios, bps, "at_gr1", "eom")
+        .filter(pl.col("sz_pf").is_not_null() & pl.col("char_pf").is_not_null())
+        .pipe(_value_weight, ["eom", "sz_pf", "char_pf"])
+        .with_columns(
+            pl.when(pl.col("char_pf") == "L").then(0.5 * pl.col("vw"))
+            .when(pl.col("char_pf") == "H").then(-0.5 * pl.col("vw"))
+            .otherwise(0.0)
+            .alias("w_IA")
+        )
+        .filter(pl.col("w_IA") != 0.0)
+        .select(["eom", "id", "w_IA"])
+    )
+
+
+def compute_bab(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Frazzini-Pedersen (2014) BAB: rank-weighted, each leg scaled to unit beta.
+    Long = low-beta stocks (centered rank < 0); Short = high-beta stocks (centered rank > 0).
+    Weights are rank-based (not value-weighted); the net beta of the factor is zero.
+    """
+    return (
+        df.filter(pl.col("betabab_1260d").is_not_null())
+        .with_columns(
+            pl.col("betabab_1260d").rank("average").over("eom").alias("beta_rank"),
+            pl.col("betabab_1260d").count().over("eom").alias("n"),
+        )
+        .with_columns(
+            (pl.col("beta_rank") - (pl.col("n") + 1) / 2).alias("z")
+        )
+        .with_columns(
+            pl.when(pl.col("z") < 0).then(pl.col("z").abs()).alias("z_long"),
+            pl.when(pl.col("z") > 0).then(pl.col("z").abs()).alias("z_short"),
+        )
+        .with_columns(
+            (pl.col("z_long") / pl.col("z_long").sum().over("eom")).alias("w_long_raw"),
+            (pl.col("z_short") / pl.col("z_short").sum().over("eom")).alias("w_short_raw"),
+        )
+        .with_columns(
+            (pl.col("w_long_raw") * pl.col("betabab_1260d")).sum().over("eom").alias("beta_L"),
+            (pl.col("w_short_raw") * pl.col("betabab_1260d")).sum().over("eom").alias("beta_H"),
+        )
+        .with_columns(
+            pl.when(pl.col("z") < 0).then(pl.col("w_long_raw") / pl.col("beta_L"))
+            .when(pl.col("z") > 0).then(-(pl.col("w_short_raw") / pl.col("beta_H")))
+            .otherwise(0.0)
+            .alias("w_BAB")
+        )
+        .filter(pl.col("w_BAB") != 0.0)
+        .select(["eom", "id", "w_BAB"])
+    )
+
 
 def _univariate_tercile(
     df: pl.DataFrame, char_col: str, direction: int, weight_name: str
@@ -375,7 +463,7 @@ def run_thesis_factors(*, output_dir: Path) -> None:
         1) Load filtered USA characteristics from processed/characteristics/USA.parquet.
         2) Compute Group C weights (MktRF, HML, SMB) from be_me sort.
         3) Compute Group B weights (RMW, CMA, MOM) from FF 2×3 sorts.
-        4) Compute Group A weights (BAB, ROE, IA) from univariate tercile sorts.
+        4) Compute Group A weights: BAB (Frazzini-Pedersen), ROE and IA (q-factor 2×3).
         5) Join all factor weights on (eom, id) and write parquet.
 
     Output:
@@ -426,13 +514,13 @@ def run_thesis_factors(*, output_dir: Path) -> None:
 
     # --- Group A ---
     print("Computing BAB...")
-    bab = _univariate_tercile(df, "betabab_1260d", -1, "w_BAB")
+    bab = compute_bab(df)
 
     print("Computing ROE...")
-    roe = _univariate_tercile(df, "niq_be", +1, "w_ROE")
+    roe = compute_roe(df)
 
     print("Computing IA...")
-    ia = _univariate_tercile(df, "at_gr1", -1, "w_IA")
+    ia = compute_ia(df)
 
     # --- Join all factors ---
     print("Joining factor weights...")
