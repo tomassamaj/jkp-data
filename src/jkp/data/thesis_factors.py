@@ -64,18 +64,33 @@ def _reb_year() -> pl.Expr:
     )
 
 
-def _june_breakpoints(df: pl.DataFrame, char_col: str, *, positive_char: bool = False) -> pl.DataFrame:
+_FIN_FF49 = [45, 46, 47, 48]  # Banks, Insurance, Real Estate, Finance/Trading
+
+
+def _june_breakpoints(
+    df: pl.DataFrame,
+    char_col: str,
+    *,
+    positive_char: bool = False,
+    excl_financials: bool = False,
+) -> pl.DataFrame:
     """
     Annual June NYSE breakpoints for size (p50) and char (p30 / p70).
     Returns DataFrame with columns [reb_yr, me_bp50, char_bp30, char_bp70].
+    excl_financials: if True and ff49 column is present, exclude FF49 industries
+        45-48 (Banks, Insurance, Real Estate, Finance) from breakpoint stocks only.
+        Matches French (2015) methodology for CMA and RMW.
     """
     char_filter = pl.col(char_col).is_not_null()
     if positive_char:
         char_filter = char_filter & (pl.col(char_col) > 0)
 
+    bp_df = df.filter((pl.col("eom").dt.month() == 6) & _NYSE & (pl.col("me") > 0) & char_filter)
+    if excl_financials and "ff49" in df.columns:
+        bp_df = bp_df.filter(pl.col("ff49").is_null() | ~pl.col("ff49").is_in(_FIN_FF49))
+
     return (
-        df.filter((pl.col("eom").dt.month() == 6) & _NYSE & (pl.col("me") > 0) & char_filter)
-        .group_by("eom")
+        bp_df.group_by("eom")
         .agg([
             pl.col("me").quantile(0.5, interpolation="linear").alias("me_bp50"),
             pl.col(char_col).quantile(0.3, interpolation="linear").alias("char_bp30"),
@@ -234,7 +249,7 @@ def compute_rmw(df: pl.DataFrame) -> pl.DataFrame:
     Long = Robust (high ope_be, char_pf=H), Short = Weak (low ope_be, char_pf=L).
     """
     df_sort = df.filter(pl.col("ope_be").is_not_null())
-    bps = _june_breakpoints(df_sort, "ope_be")
+    bps = _june_breakpoints(df_sort, "ope_be", excl_financials=True)
 
     return (
         df_sort.with_columns(_reb_year().alias("reb_yr"))
@@ -259,7 +274,7 @@ def compute_cma(df: pl.DataFrame) -> pl.DataFrame:
     Long = Conservative (low at_gr1, char_pf=L), Short = Aggressive (high at_gr1, char_pf=H).
     """
     df_sort = df.filter(pl.col("at_gr1").is_not_null())
-    bps = _june_breakpoints(df_sort, "at_gr1")
+    bps = _june_breakpoints(df_sort, "at_gr1", excl_financials=True)
 
     return (
         df_sort.with_columns(_reb_year().alias("reb_yr"))
@@ -371,12 +386,18 @@ def compute_bab(df: pl.DataFrame) -> pl.DataFrame:
     Frazzini-Pedersen (2014) BAB: rank-weighted, each leg scaled to unit beta.
     Long = low-beta stocks (centered rank < 0); Short = high-beta stocks (centered rank > 0).
     Weights are rank-based (not value-weighted); the net beta of the factor is zero.
+    betabab_1260d is the raw FP beta (corr_1260d × rvol_252d / mktvol_252d) without
+    shrinkage; we apply Vasicek shrinkage (0.6 × beta + 0.4 × 1) here as in FP 2014.
     """
     return (
         df.filter(pl.col("betabab_1260d").is_not_null())
         .with_columns(
-            pl.col("betabab_1260d").rank("average").over("eom").alias("beta_rank"),
-            pl.col("betabab_1260d").count().over("eom").alias("n"),
+            # Vasicek shrinkage toward 1: beta_shrunk = 0.6 × beta_raw + 0.4
+            (pl.col("betabab_1260d") * 0.6 + 0.4).alias("beta_shrunk"),
+        )
+        .with_columns(
+            pl.col("beta_shrunk").rank("average").over("eom").alias("beta_rank"),
+            pl.col("beta_shrunk").count().over("eom").alias("n"),
         )
         .with_columns(
             (pl.col("beta_rank") - (pl.col("n") + 1) / 2).alias("z")
@@ -390,8 +411,8 @@ def compute_bab(df: pl.DataFrame) -> pl.DataFrame:
             (pl.col("z_short") / pl.col("z_short").sum().over("eom")).alias("w_short_raw"),
         )
         .with_columns(
-            (pl.col("w_long_raw") * pl.col("betabab_1260d")).sum().over("eom").alias("beta_L"),
-            (pl.col("w_short_raw") * pl.col("betabab_1260d")).sum().over("eom").alias("beta_H"),
+            (pl.col("w_long_raw") * pl.col("beta_shrunk")).sum().over("eom").alias("beta_L"),
+            (pl.col("w_short_raw") * pl.col("beta_shrunk")).sum().over("eom").alias("beta_H"),
         )
         .with_columns(
             pl.when(pl.col("z") < 0).then(pl.col("w_long_raw") / pl.col("beta_L"))
@@ -475,7 +496,7 @@ def run_thesis_factors(*, output_dir: Path) -> None:
     required_cols = [
         "id", "eom", "me", "be_me", "ope_be", "at_gr1", "niq_be",
         "betabab_1260d", "ret_12_1", "ret_exc",
-        "crsp_exchcd", "comp_exchg", "size_grp",
+        "crsp_exchcd", "comp_exchg", "size_grp", "ff49",
         "primary_sec", "common", "obs_main", "exch_main",
     ]
 
