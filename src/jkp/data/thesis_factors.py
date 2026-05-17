@@ -200,11 +200,23 @@ def compute_hml_smb(df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
     """
     df_bm = df.filter(pl.col("be_me").is_not_null() & (pl.col("be_me") > 0))
     bps_bm = _june_breakpoints(df_bm, "be_me", positive_char=True)
+
+    # French methodology: portfolio assignment uses June be_me frozen for the full
+    # holding year (July→June). Monthly be_me drifts with prices, which would pull
+    # value stocks out of the H bucket in rising markets, biasing HML downward.
+    june_bm = (
+        df_bm.filter(pl.col("eom").dt.month() == 6)
+        .with_columns(pl.col("eom").dt.year().alias("reb_yr"))
+        .select(["id", "reb_yr", "be_me"])
+        .rename({"be_me": "be_me_june"})
+    )
     assigned_bm = (
         df_bm.with_columns(_reb_year().alias("reb_yr"))
-        .pipe(_assign_portfolios, bps_bm, "be_me", "reb_yr")
+        .join(june_bm, on=["id", "reb_yr"], how="left")
+        .filter(pl.col("be_me_june").is_not_null())
+        .pipe(_assign_portfolios, bps_bm, "be_me_june", "reb_yr")
         .filter(pl.col("sz_pf").is_not_null() & pl.col("char_pf").is_not_null())
-        .drop("reb_yr")
+        .drop("reb_yr", "be_me_june")
         .pipe(_value_weight, ["eom", "sz_pf", "char_pf"])
     )
 
@@ -333,18 +345,16 @@ def compute_mom(df: pl.DataFrame) -> pl.DataFrame:
 
 def compute_roe(df: pl.DataFrame) -> pl.DataFrame:
     """
-    Q-factor ROE: FF 2×3 sort on niq_be. Annual June rebalancing.
+    Q-factor ROE: FF 2×3 sort on niq_be. Monthly rebalancing.
     Long = high ROE (char_pf=H), Short = low ROE (char_pf=L).
-    Matches Hou-Xue-Zhang q5 r_roe construction.
+    Matches Hou-Xue-Zhang q5 r_roe which sorts monthly as earnings update quarterly.
     """
     df_sort = df.filter(pl.col("niq_be").is_not_null())
-    bps = _june_breakpoints(df_sort, "niq_be")
+    bps = _monthly_breakpoints(df_sort, "niq_be")
 
     return (
-        df_sort.with_columns(_reb_year().alias("reb_yr"))
-        .pipe(_assign_portfolios, bps, "niq_be", "reb_yr")
+        df_sort.pipe(_assign_portfolios, bps, "niq_be", "eom")
         .filter(pl.col("sz_pf").is_not_null() & pl.col("char_pf").is_not_null())
-        .drop("reb_yr")
         .pipe(_value_weight, ["eom", "sz_pf", "char_pf"])
         .with_columns(
             pl.when(pl.col("char_pf") == "H").then(0.5 * pl.col("vw"))

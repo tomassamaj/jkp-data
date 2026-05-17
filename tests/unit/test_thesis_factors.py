@@ -458,7 +458,7 @@ class TestUnivariateTercile:
 # =============================================================================
 
 class TestComputeRoe:
-    """Annual June rebalancing: June 2019 NYSE data sets breakpoints for July 2019+."""
+    """Monthly rebalancing: each month uses its own NYSE breakpoints (matching HXZ q-factor)."""
 
     def setup_method(self):
         self.df = _make_ff_panel([JUNE_2019, JULY_2019])
@@ -541,11 +541,13 @@ class TestComputeBab:
         assert max(short_ids) >= 26
 
     def test_net_beta_zero(self):
-        """FP property: long leg and short leg each have unit beta → net beta = 0."""
+        """FP property: long and short leg each have unit shrunk-beta → net shrunk-beta = 0."""
         bab_with_beta = self.bab.join(
             self.df.select(["id", "eom", "betabab_1260d"]), on=["id", "eom"], how="left"
+        ).with_columns(
+            (pl.col("betabab_1260d") * 0.6 + 0.4).alias("beta_shrunk")
         )
-        net_beta = (bab_with_beta["w_BAB"] * bab_with_beta["betabab_1260d"]).sum()
+        net_beta = (bab_with_beta["w_BAB"] * bab_with_beta["beta_shrunk"]).sum()
         assert abs(net_beta) < 1e-10, f"Net beta = {net_beta}, expected 0"
 
     def test_null_char_excluded(self):

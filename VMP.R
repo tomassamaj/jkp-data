@@ -1464,6 +1464,10 @@ replication_plots <- lapply(factor_specs, function(fs) {
       Original        = cumprod(1 + Original),
       `JKP Replicated` = cumprod(1 + `JKP Replicated`)
     ) |>
+    mutate(
+      Original        = Original / first(Original),
+      `JKP Replicated` = `JKP Replicated` / first(`JKP Replicated`)
+    ) |>
     pivot_longer(cols = -date, names_to = "source", values_to = "cumret") |>
     ggplot(aes(x = date, y = cumret, color = source)) +
     geom_line(alpha = 0.75, linewidth = 0.4) +
