@@ -172,7 +172,10 @@ class TestComputeHmlSmb:
     """Annual June rebalancing: June 2019 NYSE data sets breakpoints for July 2019+."""
 
     def setup_method(self):
-        self.df = _make_ff_panel([JUNE_2019, JULY_2019, AUG_2019])
+        # DEC_2018 provides the December prior-year ME needed for French B/M computation.
+        # me is constant (100/500) across months so bm_french = be_me_june, preserving
+        # all existing assertions about portfolio membership.
+        self.df = _make_ff_panel([DEC_2018, JUNE_2019, JULY_2019, AUG_2019])
         self.hml, self.smb = compute_hml_smb(self.df)
 
     def _july_hml(self):

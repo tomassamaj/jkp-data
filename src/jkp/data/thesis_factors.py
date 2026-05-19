@@ -198,25 +198,46 @@ def compute_hml_smb(df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
       2×3 annual sorts on be_me, ope_be, and at_gr1.
     Returns (hml_weights, smb_weights) each with columns [eom, id, w_*].
     """
-    df_bm = df.filter(pl.col("be_me").is_not_null() & (pl.col("be_me") > 0))
-    bps_bm = _june_breakpoints(df_bm, "be_me", positive_char=True)
-
-    # French methodology: portfolio assignment uses June be_me frozen for the full
-    # holding year (July→June). Monthly be_me drifts with prices, which would pull
-    # value stocks out of the H bucket in rising markets, biasing HML downward.
-    june_bm = (
-        df_bm.filter(pl.col("eom").dt.month() == 6)
-        .with_columns(pl.col("eom").dt.year().alias("reb_yr"))
-        .select(["id", "reb_yr", "be_me"])
-        .rename({"be_me": "be_me_june"})
+    # French (1993) B/M uses December prior-year ME as denominator, not June ME.
+    # Dec year y → reb_yr y+1, matching the July y+1 – June y+2 holding period.
+    dec_me = (
+        df.filter(pl.col("eom").dt.month() == 12)
+        .with_columns((pl.col("eom").dt.year() + 1).alias("reb_yr"))
+        .select(["id", "reb_yr", "me"])
+        .rename({"me": "me_dec"})
     )
+    # June B/M (frozen for the year): book_equity ≈ be_me_june × me_june,
+    # then divide by December prior-year ME to match French's denominator.
+    june_bm = (
+        df.filter(pl.col("be_me").is_not_null() & (pl.col("be_me") > 0) & (pl.col("eom").dt.month() == 6))
+        .with_columns(pl.col("eom").dt.year().alias("reb_yr"))
+        .join(dec_me, on=["id", "reb_yr"], how="left")
+        .filter(pl.col("me_dec").is_not_null() & (pl.col("me_dec") > 0))
+        .with_columns(((pl.col("be_me") * pl.col("me")) / pl.col("me_dec")).alias("bm_french"))
+        .filter(pl.col("bm_french") > 0)
+        .select(["id", "reb_yr", "bm_french"])
+    )
+    # Breakpoints: NYSE June stocks with valid French B/M.
+    bps_bm = (
+        df.filter((pl.col("eom").dt.month() == 6) & _NYSE & (pl.col("me") > 0))
+        .with_columns(pl.col("eom").dt.year().alias("reb_yr"))
+        .join(june_bm, on=["id", "reb_yr"], how="left")
+        .filter(pl.col("bm_french").is_not_null())
+        .group_by("reb_yr")
+        .agg([
+            pl.col("me").quantile(0.5, interpolation="linear").alias("me_bp50"),
+            pl.col("bm_french").quantile(0.3, interpolation="linear").alias("char_bp30"),
+            pl.col("bm_french").quantile(0.7, interpolation="linear").alias("char_bp70"),
+        ])
+    )
+    df_bm = df.filter(pl.col("be_me").is_not_null() & (pl.col("be_me") > 0))
     assigned_bm = (
         df_bm.with_columns(_reb_year().alias("reb_yr"))
         .join(june_bm, on=["id", "reb_yr"], how="left")
-        .filter(pl.col("be_me_june").is_not_null())
-        .pipe(_assign_portfolios, bps_bm, "be_me_june", "reb_yr")
+        .filter(pl.col("bm_french").is_not_null())
+        .pipe(_assign_portfolios, bps_bm, "bm_french", "reb_yr")
         .filter(pl.col("sz_pf").is_not_null() & pl.col("char_pf").is_not_null())
-        .drop("reb_yr", "be_me_june")
+        .drop("reb_yr", "bm_french")
         .pipe(_value_weight, ["eom", "sz_pf", "char_pf"])
     )
 
@@ -261,6 +282,8 @@ def compute_rmw(df: pl.DataFrame) -> pl.DataFrame:
     Long = Robust (high ope_be, char_pf=H), Short = Weak (low ope_be, char_pf=L).
     """
     df_sort = df.filter(pl.col("ope_be").is_not_null())
+    if "ff49" in df.columns:
+        df_sort = df_sort.filter(pl.col("ff49").is_null() | ~pl.col("ff49").is_in(_FIN_FF49))
     bps = _june_breakpoints(df_sort, "ope_be", excl_financials=True)
 
     return (
@@ -284,18 +307,30 @@ def compute_cma(df: pl.DataFrame) -> pl.DataFrame:
     """
     FF 2×3 sort on at_gr1. Annual June rebalancing.
     Long = Conservative (low at_gr1, char_pf=L), Short = Aggressive (high at_gr1, char_pf=H).
+    Financials excluded from portfolio and breakpoints (French 2015).
+    June at_gr1 frozen for the holding year to prevent mid-year re-sorting as new
+    annual filings arrive in JKP data.
     """
     df_sort = df.filter(pl.col("at_gr1").is_not_null())
+    if "ff49" in df.columns:
+        df_sort = df_sort.filter(pl.col("ff49").is_null() | ~pl.col("ff49").is_in(_FIN_FF49))
     bps = _june_breakpoints(df_sort, "at_gr1", excl_financials=True)
 
+    june_at = (
+        df_sort.filter(pl.col("eom").dt.month() == 6)
+        .with_columns(pl.col("eom").dt.year().alias("reb_yr"))
+        .select(["id", "reb_yr", "at_gr1"])
+        .rename({"at_gr1": "at_gr1_june"})
+    )
     return (
         df_sort.with_columns(_reb_year().alias("reb_yr"))
-        .pipe(_assign_portfolios, bps, "at_gr1", "reb_yr")
+        .join(june_at, on=["id", "reb_yr"], how="left")
+        .filter(pl.col("at_gr1_june").is_not_null())
+        .pipe(_assign_portfolios, bps, "at_gr1_june", "reb_yr")
         .filter(pl.col("sz_pf").is_not_null() & pl.col("char_pf").is_not_null())
-        .drop("reb_yr")
+        .drop("reb_yr", "at_gr1_june")
         .pipe(_value_weight, ["eom", "sz_pf", "char_pf"])
         .with_columns(
-            # Low at_gr1 = conservative = long
             pl.when(pl.col("char_pf") == "L").then(0.5 * pl.col("vw"))
             .when(pl.col("char_pf") == "H").then(-0.5 * pl.col("vw"))
             .otherwise(0.0)
@@ -350,6 +385,8 @@ def compute_roe(df: pl.DataFrame) -> pl.DataFrame:
     Matches Hou-Xue-Zhang q5 r_roe which sorts monthly as earnings update quarterly.
     """
     df_sort = df.filter(pl.col("niq_be").is_not_null())
+    if "ff49" in df.columns:
+        df_sort = df_sort.filter(pl.col("ff49").is_null() | ~pl.col("ff49").is_in(_FIN_FF49))
     bps = _monthly_breakpoints(df_sort, "niq_be")
 
     return (
@@ -374,6 +411,8 @@ def compute_ia(df: pl.DataFrame) -> pl.DataFrame:
     Matches Hou-Xue-Zhang q5 r_ia construction.
     """
     df_sort = df.filter(pl.col("at_gr1").is_not_null())
+    if "ff49" in df.columns:
+        df_sort = df_sort.filter(pl.col("ff49").is_null() | ~pl.col("ff49").is_in(_FIN_FF49))
     bps = _monthly_breakpoints(df_sort, "at_gr1")
 
     return (
